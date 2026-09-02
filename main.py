@@ -220,3 +220,320 @@ color:#fff;font-weight:1000;cursor:pointer}
  <div class="resultBox">
   <div style="letter-spacing:3px;font-size:14px">BATTLE RESULT</div>
   <div id="winner">PLAYER 1 WINS!</div>
+  <div class="finalScores">
+   <div>PLAYER 2<br><span id="final2">0</span></div>
+   <div>PLAYER 1<br><span id="final1">0</span></div>
+  </div>
+  <button id="again">BACK TO SONG SELECT</button>
+ </div>
+</div>
+</div>
+
+<script>
+const songs=[
+{name:"NEON DREAM",bpm:112,diff:"★★★",color:"#ff36bb"},
+{name:"ELECTRIC SHOCK",bpm:124,diff:"★★★★",color:"#24dfff"},
+{name:"GALAXY RUSH",bpm:132,diff:"★★★★",color:"#8b6cff"},
+{name:"BLAZING SOUL",bpm:140,diff:"★★★★★",color:"#ff704d"},
+{name:"CYBER PUNK",bpm:148,diff:"★★★★★",color:"#42ff9c"},
+{name:"STARLIGHT",bpm:105,diff:"★★",color:"#f6e66b"},
+{name:"INFINITY",bpm:136,diff:"★★★★★",color:"#c66cff"},
+{name:"NIGHT DRIVE",bpm:120,diff:"★★★",color:"#5ee7ff"}
+];
+
+const lanes1=["q","w","e","r"], lanes2=["o","p","[","]"];
+const arrows1=["Q","W","E","R"], arrows2=["O","P","[","]"];
+const DURATION=180000;
+let selected=0,playing=false,startTime=0,lastFrame=0,spawnAcc=0,raf=0;
+
+const state={
+1:{score:0,combo:0,notes:[],held:{}},
+2:{score:0,combo:0,notes:[],held:{}}
+};
+
+function buildSongs(){
+ const grid=document.getElementById("songGrid"), bar=document.getElementById("songbar");
+ grid.innerHTML="";bar.innerHTML="";
+ songs.forEach((s,i)=>{
+  const p=document.createElement("button");
+  p.className="pick"+(i===selected?" sel":"");
+  p.innerHTML=`<b>${s.name}</b><br><small>BPM ${s.bpm} · ${s.diff}</small>`;
+  p.onclick=()=>{selected=i;buildSongs()};
+  grid.appendChild(p);
+
+  const b=document.createElement("button");
+  b.className="song"+(i===selected?" selected":"");b.style.color=s.color;
+  b.innerHTML=`<div class="name">${s.name}</div><div class="meta">BPM ${s.bpm} · 03:00</div>`;
+  b.onclick=()=>{selected=i;buildSongs();};
+  bar.appendChild(b);
+ });
+}
+buildSongs();
+
+function fmt(n){return Math.floor(n).toLocaleString("en-US").padStart(7,"0")}
+function updateHud(){
+ document.getElementById("score1").textContent=fmt(state[1].score);
+ document.getElementById("score2").textContent=fmt(state[2].score);
+ document.getElementById("combo1").textContent=state[1].combo;
+ document.getElementById("combo2").textContent=state[2].combo;
+}
+function judgeText(p,t,c){
+ const e=document.getElementById("j"+p);
+ e.className="jmsg p"+p+"msg "+c;e.textContent=t;void e.offsetWidth;e.classList.add("show");
+}
+function speedAt(t){
+ // Slower than the earlier version, with a gradual increase.
+ return 240 + Math.min(t/DURATION,1)*300;
+}
+function intervalAt(t){
+ const x=Math.min(t/DURATION,1), bpm=songs[selected].bpm;
+ // Very sparse/easy start, then progressively denser.
+ return Math.max(300,60000/(bpm*(0.62+x*0.82)));
+}
+function spawnNote(p,lane,hold,travel){
+ const side=document.getElementById("notes"+p);
+ const el=document.createElement("div");
+ const neon=p===1?["#24dfff","#00aaff","#8e7dff","#45ffb0"][lane]:
+                   ["#ff36bb","#ff4f76","#c86cff","#ff63e8"][lane];
+ el.className="note"+(hold?" hold":"");
+ el.style.color=neon;
+ el.dataset.key=(p===1?lanes1:lanes2)[lane];
+ el.dataset.player=p;el.dataset.hold=hold?"1":"0";
+ el.dataset.spawn=performance.now();el.dataset.travel=travel;
+ el.dataset.lane=lane;
+ if(hold){
+   const len=80+Math.random()*120;
+   el.dataset.length=len;
+   el.innerHTML=`<div class="holdBody" style="height:${len}px"></div>
+                 <div class="holdTail"></div><div class="arrow">${p===1?arrows1[lane]:arrows2[lane]}</div>`;
+   el.style.setProperty("--bodyHeight",len+"px");
+ }else{
+   el.innerHTML=`<div class="arrow">${p===1?arrows1[lane]:arrows2[lane]}</div>`;
+ }
+ side.appendChild(el);state[p].notes.push(el);
+}
+
+function spawnPattern(elapsed){
+ const progress=Math.min(elapsed/DURATION,1);
+ const speed=speedAt(elapsed);
+ let count=1;
+ if(progress>=.25 && Math.random()<(progress-.25)*1.35) count=2;
+ if(progress>=.60 && Math.random()<(progress-.60)*1.05) count=3;
+ count=Math.min(count,3);
+
+ // Occasionally synchronize a note between players.
+ for(let p=1;p<=2;p++){
+   let chosen=[];
+   for(let k=0;k<count;k++){
+    let lane=Math.floor(Math.random()*4),guard=0;
+    while(chosen.includes(lane)&&guard++<10)lane=Math.floor(Math.random()*4);
+    chosen.push(lane);
+    const hold=Math.random()<(.025+progress*.14);
+    spawnNote(p,lane,hold,Math.max(1050,speed*2.25));
+   }
+ }
+}
+
+function getGeom(side,progress,lane){
+ // Perspective geometry: top is narrow, bottom is wide.
+ const topL=.23, topR=.77, botL=0, botR=1;
+ const t=Math.max(0,Math.min(1,progress));
+ const left=topL+(botL-topL)*t;
+ const right=topR+(botR-topR)*t;
+ const center=left+(right-left)*(lane+.5)/4;
+ const width=(right-left)/4;
+ return {x:(center*side.clientWidth),w:(width*side.clientWidth)};
+}
+
+function updateNotes(now){
+ for(let p=1;p<=2;p++){
+  const side=document.getElementById("side"+p);
+  const sr=side.getBoundingClientRect();
+  const lineY=side.clientHeight-88;
+  for(const el of [...state[p].notes]){
+   if(!el.isConnected)continue;
+   const progress=(now-Number(el.dataset.spawn))/Number(el.dataset.travel);
+   const y=-55+progress*(side.clientHeight+80);
+   const geom=getGeom(side,Math.max(0,progress),Number(el.dataset.lane));
+   el.style.top=y+"px";
+   el.style.left=(geom.x-geom.w/2)+"px";
+   el.style.width=Math.max(28,geom.w*.88)+"px";
+
+   // A hold tail reaches the judgement line later than its head.
+   const len=Number(el.dataset.length||0);
+   const tailY=y-len;
+   if(el.dataset.hold==="1"){
+     if(el.dataset.active==="1" && tailY>=lineY){
+       finishHold(p,el);
+       continue;
+     }
+   }
+   if(el.dataset.hold!=="1" && y>=lineY+45){miss(p,el);continue}
+   if(el.dataset.hold==="1" && el.dataset.active!=="1" && y>=lineY+45){miss(p,el);continue}
+   if(el.dataset.hold==="1" && el.dataset.active==="1" && y>=lineY+len+70){
+     // Safety fallback if a held note somehow passes the tail.
+     finishHold(p,el);
+   }
+  }
+ }
+}
+
+function closestNote(p,k){
+ const side=document.getElementById("side"+p);
+ const lineY=side.clientHeight-88;
+ let best=null,diff=Infinity;
+ for(const n of state[p].notes){
+  if(n.dataset.key!==k || n.dataset.active==="1")continue;
+  const r=n.getBoundingClientRect(),sr=side.getBoundingClientRect();
+  const y=r.top-sr.top+r.height/2,d=Math.abs(y-lineY);
+  if(d<diff){diff=d;best=n}
+ }
+ return {best,diff};
+}
+
+function hitNote(p,k){
+ const q=closestNote(p,k);
+ if(!q.best || q.diff>48)return;
+ const el=q.best;
+ if(el.dataset.hold==="1"){
+  const points=100+Math.min(150,state[p].combo*2);
+  state[p].combo++;state[p].score+=points;
+  el.dataset.active="1";state[p].held[k]=el;el.classList.add("activeHold");
+  judgeText(p,"PERFECT","perfect");
+  updateHud();
+ }else{
+  const perfect=q.diff<=22,points=(perfect?100:60)+Math.min(150,state[p].combo*2);
+  state[p].combo++;state[p].score+=points;
+  el.classList.add("done");
+  judgeText(p,perfect?"PERFECT":"GREAT",perfect?"perfect":"great");
+  setTimeout(()=>el.remove(),120);
+  state[p].notes=state[p].notes.filter(n=>n!==el);
+  updateHud();
+ }
+}
+
+function releaseHold(p,k){
+ const el=state[p].held[k];
+ if(!el)return;
+ const side=document.getElementById("side"+p),lineY=side.clientHeight-88;
+ const r=el.getBoundingClientRect(),sr=side.getBoundingClientRect();
+ const headY=r.top-sr.top+r.height/2;
+ const len=Number(el.dataset.length||0);
+ const tailY=headY-len;
+ if(tailY>=lineY){
+   finishHold(p,el);
+ }else{
+   state[p].combo=0;
+   state[p].score=Math.max(0,state[p].score-25);
+   judgeText(p,"MISS","miss");
+   removeNote(p,el);
+   updateHud();
+ }
+ state[p].held[k]=null;
+}
+
+function finishHold(p,el){
+ if(!el||!el.isConnected)return;
+ const k=el.dataset.key;
+ state[p].held[k]=null;
+ state[p].combo++;
+ state[p].score+=120+Math.min(180,state[p].combo*2);
+ judgeText(p,"GREAT","holdok");
+ removeNote(p,el);updateHud();
+}
+function removeNote(p,el){
+ el.classList.add("done");
+ setTimeout(()=>el.remove(),110);
+ state[p].notes=state[p].notes.filter(n=>n!==el);
+}
+function miss(p,el){
+ state[p].combo=0;state[p].score=Math.max(0,state[p].score-25);
+ judgeText(p,"MISS","miss");removeNote(p,el);updateHud();
+}
+
+function gameLoop(now){
+ if(!playing)return;
+ const elapsed=now-startTime,remain=Math.max(0,DURATION-elapsed);
+ const sec=Math.ceil(remain/1000);
+ document.getElementById("clock").textContent=
+  String(Math.floor(sec/60)).padStart(2,"0")+":"+String(sec%60).padStart(2,"0");
+ document.getElementById("progressFill").style.width=(elapsed/DURATION*100)+"%";
+ spawnAcc+=lastFrame?now-lastFrame:16;
+ if(spawnAcc>=intervalAt(elapsed)){spawnAcc=0;spawnPattern(elapsed)}
+ updateNotes(now);lastFrame=now;
+ if(elapsed>=DURATION){finish();return}
+ raf=requestAnimationFrame(gameLoop);
+}
+function clearNotes(){
+ for(let p=1;p<=2;p++){
+  state[p].notes.forEach(n=>n.remove());state[p].notes=[];state[p].held={};
+ }
+}
+function reset(){
+ for(let p=1;p<=2;p++){state[p].score=0;state[p].combo=0;state[p].notes=[];state[p].held={}}
+ updateHud();clearNotes();
+ document.getElementById("clock").textContent="03:00";
+ document.getElementById("progressFill").style.width="0%";
+}
+function startGame(){
+ document.getElementById("overlay").style.display="none";
+ document.getElementById("result").style.display="none";
+ reset();playing=true;startTime=performance.now();lastFrame=0;spawnAcc=0;
+ document.getElementById("app").focus();raf=requestAnimationFrame(gameLoop);
+}
+function finish(){
+ playing=false;cancelAnimationFrame(raf);clearNotes();
+ const s1=state[1].score,s2=state[2].score;
+ document.getElementById("final1").textContent=s1.toLocaleString();
+ document.getElementById("final2").textContent=s2.toLocaleString();
+ const w=document.getElementById("winner");
+ if(s1>s2){w.textContent="PLAYER 1 WINS!";w.style.color="#22e4ff"}
+ else if(s2>s1){w.textContent="PLAYER 2 WINS!";w.style.color="#ff36bb"}
+ else{w.textContent="DRAW!";w.style.color="#fff"}
+ document.getElementById("result").style.display="flex";
+}
+
+function keyNorm(e){
+ if(e.key.length===1)return e.key.toLowerCase();
+ return e.key;
+}
+document.addEventListener("keydown",e=>{
+ const k=keyNorm(e);
+ let p=lanes1.includes(k)?1:(lanes2.includes(k)?2:null);
+ if(!p)return;
+ e.preventDefault();
+ const keyEl=document.querySelector(`.key[data-player="${p}"][data-key="${CSS.escape(k)}"]`);
+ if(keyEl)keyEl.classList.add("down");
+ if(playing && !state[p].held[k])hitNote(p,k);
+});
+document.addEventListener("keyup",e=>{
+ const k=keyNorm(e);
+ let p=lanes1.includes(k)?1:(lanes2.includes(k)?2:null);
+ if(!p)return;e.preventDefault();
+ const keyEl=document.querySelector(`.key[data-player="${p}"][data-key="${CSS.escape(k)}"]`);
+ if(keyEl)keyEl.classList.remove("down");
+ if(playing)releaseHold(p,k);
+});
+document.getElementById("go").onclick=startGame;
+document.getElementById("again").onclick=()=>{
+ document.getElementById("result").style.display="none";
+ document.getElementById("overlay").style.display="flex";
+};
+document.getElementById("app").addEventListener("click",()=>document.getElementById("app").focus());
+</script>
+</body>
+</html>
+"""
+
+out = Path("/mnt/data/neon_duel_rhythm_game.py")
+out.write_text(
+    'import streamlit as st\nimport streamlit.components.v1 as components\n' +
+    # Keep the generated HTML as a raw triple-quoted string in the Python file.
+    '\n' + 'st.set_page_config(page_title="NEON DUEL", page_icon="🎵", layout="wide", initial_sidebar_state="collapsed")\n' +
+    'st.markdown("""<style>html,body,[data-testid="stAppViewContainer"],[data-testid="stApp"]{background:#000!important}[data-testid="stHeader"],[data-testid="stToolbar"],[data-testid="stDecoration"],[data-testid="stStatusWidget"]{display:none!important}.block-container{padding:0!important;max-width:100%!important}iframe{border:0!important;width:100%!important}</style>""",unsafe_allow_html=True)\n' +
+    'components.html(' + repr(html) + ', height=900, scrolling=False)\n',
+    encoding="utf-8"
+)
+print(f"완성: {out}")
+print("P1 = Q W E R / P2 = O P [ ]")
+print("4칸 원근 사선 맵, 느린 시작, 점진적 난이도, HOLD 타일 포함")
